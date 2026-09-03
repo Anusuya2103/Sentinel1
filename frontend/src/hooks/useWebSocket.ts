@@ -1,7 +1,5 @@
 ﻿import { useEffect, useReducer, useRef, useCallback } from "react";
 
-// â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 export interface Transcript {
   responder_id: string;
   text: string;
@@ -50,15 +48,16 @@ export interface DashboardState {
   activeFires: string[];
   safeRoutes: string[];
   sensors: Record<string, Sensor>;
+  sensorHistory: Record<string, number[]>; // sparkline data — last 30 readings
   transcripts: Transcript[];
   incidents: Record<string, Incident>;
   actions: Record<string, Action>;
   activeConflict: ConflictAlert | null;
   agentStatus: string;
   agentSessionId: string | null;
+  lastTickMs: number | null; // last intelligence tick timestamp
+  incidentCount: number;
 }
-
-// â”€â”€ Reducer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type Action_ =
   | { type: "CONNECTED" }
@@ -72,16 +71,24 @@ const initial: DashboardState = {
   activeFires: [],
   safeRoutes: ["North_Gate", "East_Gate"],
   sensors: {
-    Sensor_A: { value: 42, unit: "Â°C", location: "East Warehouse" },
+    Sensor_A: { value: 42, unit: "°C", location: "East Warehouse" },
     Sensor_B: { value: 15, unit: "ppm", location: "Chemical Storage" },
   },
+  sensorHistory: { Sensor_A: [42], Sensor_B: [15] },
   transcripts: [],
   incidents: {},
   actions: {},
   activeConflict: null,
   agentStatus: "idle",
   agentSessionId: null,
+  lastTickMs: null,
+  incidentCount: 0,
 };
+
+function appendHistory(history: number[], value: number): number[] {
+  const next = [...history, value];
+  return next.length > 30 ? next.slice(-30) : next;
+}
 
 function reducer(state: DashboardState, action: Action_): DashboardState {
   switch (action.type) {
@@ -92,8 +99,12 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
     case "WS_EVENT": {
       const { event, payload } = action as { type: "WS_EVENT"; event: string; payload: Record<string, unknown> };
       const p = payload as Record<string, unknown>;
+
       switch (event) {
-        case "state_snapshot":
+        case "state_snapshot": {
+          const snapTranscripts = (p.transcripts as Transcript[] | undefined) ?? [];
+          const existingKeys = new Set(state.transcripts.map(t => `${t.timestamp}-${t.responder_id}`));
+          const newFromSnap = snapTranscripts.filter(t => !existingKeys.has(`${t.timestamp}-${t.responder_id}`));
           return {
             ...state,
             hazardLevel: (p.hazard_level as string) ?? state.hazardLevel,
@@ -105,33 +116,45 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
             actions: (p.actions as Record<string, Action>) ?? state.actions,
             agentStatus: (p.agent_status as string) ?? state.agentStatus,
             agentSessionId: (p.agent_session_id as string | null) ?? state.agentSessionId,
+            transcripts: [...state.transcripts, ...newFromSnap].slice(-200),
+            incidentCount: Object.keys((p.incidents as Record<string, Incident>) ?? {}).length,
           };
+        }
 
-        case "transcript":
-          return {
-            ...state,
-            transcripts: [
-              ...state.transcripts.slice(-199),
-              p as unknown as Transcript,
-            ],
-          };
+        case "transcript": {
+          const t = p as unknown as Transcript;
+          const key = `${t.timestamp}-${t.responder_id}`;
+          if (state.transcripts.some(x => `${x.timestamp}-${x.responder_id}` === key)) return state;
+          return { ...state, transcripts: [...state.transcripts.slice(-199), t] };
+        }
 
-        case "telemetry_update":
+        case "telemetry_update": {
+          const newSensors = { ...state.sensors, ...(p.sensors as Record<string, Sensor>) };
+          const newHistory = { ...state.sensorHistory };
+          for (const [id, s] of Object.entries(p.sensors as Record<string, Sensor>)) {
+            newHistory[id] = appendHistory(newHistory[id] ?? [], s.value);
+          }
           return {
             ...state,
             hazardLevel: (p.hazard_level as string) ?? state.hazardLevel,
-            sensors: { ...state.sensors, ...(p.sensors as Record<string, Sensor>) },
+            sensors: newSensors,
+            sensorHistory: newHistory,
           };
+        }
 
-        case "incident_update":
+        case "incident_update": {
+          const newIncidents = { ...state.incidents, ...(p.incidents as Record<string, Incident>) };
           return {
             ...state,
             hazardLevel: (p.hazard_level as string) ?? state.hazardLevel,
             chemicalThreat: (p.chemical_threat as string | null) ?? state.chemicalThreat,
             activeFires: (p.active_fires as string[]) ?? state.activeFires,
-            incidents: { ...state.incidents, ...(p.incidents as Record<string, Incident>) },
+            incidents: newIncidents,
             actions: { ...state.actions, ...(p.actions as Record<string, Action>) },
+            lastTickMs: Date.now(),
+            incidentCount: Object.keys(newIncidents).length,
           };
+        }
 
         case "conflict_alert":
           return { ...state, activeConflict: p as unknown as ConflictAlert };
@@ -147,17 +170,21 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
           };
         }
 
-        case "agent_lifecycle":
+        case "agent_lifecycle": {
+          const evt = p.event as string;
+          const newStatus =
+            evt === "joined"  ? "active"
+            : evt === "created" ? "joining"
+            : evt === "joining" ? "joining"
+            : evt === "stopped" ? "stopped"
+            : evt === "error"   ? "error"
+            : state.agentStatus;
           return {
             ...state,
-            agentStatus: (p.event as string) === "joined" ? "active"
-              : (p.event as string) === "stopped" ? "stopped"
-              : (p.event as string) === "error" ? "error"
-              : state.agentStatus,
+            agentStatus: newStatus,
+            agentSessionId: (p.session_id as string | null) ?? state.agentSessionId,
           };
-
-        case "agent_interrupted":
-          return state; // visual flash handled by DissonanceBanner
+        }
 
         default:
           return state;
@@ -167,8 +194,6 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
       return state;
   }
 }
-
-// â”€â”€ Hook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000/ws";
 
@@ -180,22 +205,17 @@ export function useWebSocket() {
   const connect = useCallback(() => {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
-
     ws.onopen = () => dispatch({ type: "CONNECTED" });
     ws.onclose = () => {
       dispatch({ type: "DISCONNECTED" });
-      // Auto-reconnect after 3s
       reconnectTimer.current = setTimeout(connect, 3000);
     };
     ws.onerror = () => ws.close();
-
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown };
         dispatch({ type: "WS_EVENT", event: msg.type, payload: msg.payload as Record<string, unknown> });
-      } catch {
-        // ignore malformed messages
-      }
+      } catch { /* ignore */ }
     };
   }, []);
 
@@ -209,6 +229,3 @@ export function useWebSocket() {
 
   return dashState;
 }
-
-
-
