@@ -160,11 +160,25 @@ async def get_agent_status(session_id: str | None = None) -> dict | None:
         result = await loop.run_in_executor(
             None, lambda: client.agents.get(appid=config.AGORA_APP_ID, agent_id=sid)
         )
-        return result if isinstance(result, dict) else vars(result)
+        if result is None:
+            return None
+        # Normalize to dict and extract status field
+        if not isinstance(result, dict):
+            try:
+                result = vars(result)
+            except Exception:
+                result = {}
+        # Agora SDK wraps the response — unwrap agent field if present
+        if "agent" in result:
+            result = result["agent"]
+        # Log full result once for debugging
+        logger.debug("Agent status raw: %s", result)
+        return result
     except Exception as exc:
-        logger.exception("Failed to get agent status: %s", exc)
+        logger.warning("Failed to get agent status: %s", exc)
         return None
 
 
 def get_active_session_id() -> str | None:
     return _active_session_id
+
