@@ -21,31 +21,48 @@ logger = logging.getLogger("sentinel1.conflict_engine")
 _client = AsyncGroq(api_key=config.GROQ_API_KEY)
 
 ANALYSIS_PROMPT = """\
-You are the Sentinel-1 AI Core. Analyze this emergency context and output ONLY valid JSON.
+You are the Sentinel-1 AI Core analyzing an active emergency incident.
 
-[STATE]
-Hazard Level: {hazard_level}
-Safe Evac Routes: {safe_routes}
-Sensors: {sensor_readings}
+CURRENT SITUATION:
+- Hazard Level: {hazard_level}
+- Safe Evacuation Routes: {safe_routes}
+- Sensor_A (East Warehouse Thermal): {sensor_a_val}{sensor_a_unit} [TREND: {sensor_a_trend}]
+- Sensor_B (Chemical Storage Toxicity): {sensor_b_val}{sensor_b_unit} [TREND: {sensor_b_trend}]
 
-[TRANSCRIPTS]
+RECENT VOICE TRANSCRIPTS:
 {transcripts_formatted}
 
-Role authority: Hazmat_Lead=0.9 chemical, Fire_Chief=0.85 fire, Traffic_Control=0.4 hazard.
-Confidence: base 70%, +30% if sensor-corroborated, -50% if sensor-contradicted.
+ROLE AUTHORITY WEIGHTS:
+- Hazmat_Lead: 0.9 on chemical claims, 0.3 on fire claims
+- Fire_Chief: 0.85 on fire claims, 0.4 on chemical claims
+- Traffic_Control: 0.9 on traffic/route claims, 0.4 on hazard claims
 
-Output this exact JSON structure and nothing else:
+CONFIDENCE SCORING:
+- Base: 70%
+- +30% if corroborated by sensor telemetry or another authority
+- -50% if directly contradicted by sensor readings
+
+CRITICAL: You MUST output ONLY valid JSON. No prose, no markdown, no explanation.
+If there are no incidents, output the schema with empty arrays.
+
+OUTPUT THIS EXACT JSON:
 {{
-  "state_updates": {{"chemical_threat": null, "active_fires": []}},
+  "state_updates": {{
+    "chemical_threat": null,
+    "active_fires": []
+  }},
   "extracted_incidents": [
     {{
       "id": "INC-001",
-      "description": "description here",
+      "description": "One clear sentence describing the incident",
       "priority": "P1_CRITICAL",
       "confidence": 0.85,
       "source": "Fire_Chief",
-      "corroborated_by": [],
-      "conflict_detected": {{"with_incident_id": "INC-002", "details": "conflict details"}}
+      "corroborated_by": ["Sensor_A"],
+      "conflict_detected": {{
+        "with_incident_id": "INC-002",
+        "details": "Fire Chief says safe but Sensor B reads 85ppm — direct contradiction"
+      }}
     }}
   ],
   "recommended_actions": [
@@ -53,13 +70,34 @@ Output this exact JSON structure and nothing else:
       "action_id": "ACT-001",
       "type": "EVACUATE",
       "target": "North_Gate",
-      "message": "Initiate evacuation via North Gate",
+      "message": "Initiate evacuation via North Gate immediately due to toxic chemical levels",
       "critical": true
     }}
   ]
 }}"""
 
 _last_flush: float = 0.0
+_sensor_history: dict[str, list[float]] = {"Sensor_A": [], "Sensor_B": []}
+
+
+def _get_trend(sensor_id: str, current: float) -> str:
+    history = _sensor_history.get(sensor_id, [])
+    if len(history) < 3:
+        return "STABLE"
+    recent_avg = sum(history[-3:]) / 3
+    if current > recent_avg * 1.05:
+        return "RISING ↑"
+    elif current < recent_avg * 0.95:
+        return "FALLING ↓"
+    return "STABLE →"
+
+
+def _update_sensor_history(sensor_id: str, value: float) -> None:
+    if sensor_id not in _sensor_history:
+        _sensor_history[sensor_id] = []
+    _sensor_history[sensor_id].append(value)
+    if len(_sensor_history[sensor_id]) > 20:
+        _sensor_history[sensor_id] = _sensor_history[sensor_id][-20:]
 
 
 async def run_conflict_engine() -> None:
@@ -85,12 +123,21 @@ async def _tick() -> None:
     sensor_a = s["sensors"]["Sensor_A"]
     sensor_b = s["sensors"]["Sensor_B"]
 
+    # Update history for trend calculation
+    _update_sensor_history("Sensor_A", sensor_a["value"])
+    _update_sensor_history("Sensor_B", sensor_b["value"])
+
     prompt = ANALYSIS_PROMPT.format(
         hazard_level=s["hazard_level"],
         safe_routes=", ".join(s["safe_routes"]),
-        sensor_readings=f"Sensor_A(thermal):{sensor_a['value']}{sensor_a['unit']} Sensor_B(toxicity):{sensor_b['value']}{sensor_b['unit']}",
+        sensor_a_val=sensor_a["value"],
+        sensor_a_unit=sensor_a["unit"],
+        sensor_a_trend=_get_trend("Sensor_A", sensor_a["value"]),
+        sensor_b_val=sensor_b["value"],
+        sensor_b_unit=sensor_b["unit"],
+        sensor_b_trend=_get_trend("Sensor_B", sensor_b["value"]),
         transcripts_formatted="\n".join(
-            f"[{t['responder_id']}]: {t['text']}" for t in new_transcripts
+            f"  [{t['responder_id']}]: {t['text']}" for t in new_transcripts
         ),
     )
 
@@ -101,18 +148,30 @@ async def _tick() -> None:
     delta = state.merge_llm_result(result)
     if delta:
         delta["sensor_readings"] = {"Sensor_A": sensor_a, "Sensor_B": sensor_b}
+        delta["sensor_trends"] = {
+            "Sensor_A": _get_trend("Sensor_A", sensor_a["value"]),
+            "Sensor_B": _get_trend("Sensor_B", sensor_b["value"]),
+        }
         await ws_manager.broadcast("incident_update", delta)
 
+    # Handle P1 critical conflicts
     for incident in result.get("extracted_incidents", []):
         if incident.get("conflict_detected") and incident.get("priority") == "P1_CRITICAL":
-            logger.warning("P1 CONFLICT: %s", incident["conflict_detected"]["details"])
+            conflict_details = incident["conflict_detected"]["details"]
+            logger.warning("P1 CONFLICT: %s", conflict_details)
+
             await ws_manager.broadcast("conflict_alert", {
                 "incident_id": incident["id"],
                 "description": incident["description"],
                 "conflict": incident["conflict_detected"],
                 "confidence": incident["confidence"],
+                "timestamp": time.time(),
             })
-            await agora_agent.interrupt_agent()
+
+            # Interrupt agent so it can verbally raise the conflict
+            interrupted = await agora_agent.interrupt_agent()
+            if interrupted:
+                logger.info("Agent interrupted for P1 conflict")
 
 
 async def _call_analysis_llm(prompt: str) -> dict[str, Any] | None:
@@ -122,16 +181,17 @@ async def _call_analysis_llm(prompt: str) -> dict[str, Any] | None:
             resp = await _client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=1200,
-                temperature=0.1,
+                max_tokens=1500,
+                temperature=0.05,  # Lower temperature = more consistent JSON
             )
             raw = resp.choices[0].message.content or ""
             parsed = _parse_json(raw)
             if parsed:
                 return parsed
-            logger.warning("JSON parse failed on %s", model)
+            logger.warning("JSON parse failed on %s, raw: %.150s", model, raw)
         except Exception as exc:
             logger.warning("LLM call failed on %s: %s", model, exc)
+    logger.error("Both models failed for conflict analysis")
     return None
 
 
@@ -139,12 +199,20 @@ def _parse_json(raw: str) -> dict[str, Any] | None:
     # Strip markdown fences
     cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
     cleaned = re.sub(r"\s*```$", "", cleaned.strip(), flags=re.MULTILINE)
-    # Find first JSON object
+    # Find first complete JSON object
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if match:
         cleaned = match.group(0)
     try:
-        return json.loads(cleaned)
+        result = json.loads(cleaned)
+        # Validate required keys
+        if "extracted_incidents" not in result:
+            result["extracted_incidents"] = []
+        if "recommended_actions" not in result:
+            result["recommended_actions"] = []
+        if "state_updates" not in result:
+            result["state_updates"] = {"chemical_threat": None, "active_fires": []}
+        return result
     except json.JSONDecodeError as exc:
-        logger.error("JSON parse failed: %s | Raw: %.200s", exc, raw)
+        logger.error("JSON parse failed: %s | Raw: %.300s", exc, raw)
         return None

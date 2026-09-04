@@ -1,8 +1,7 @@
-﻿import { Thermometer, Wind, AlertTriangle } from "lucide-react";
+﻿import { Thermometer, Wind, AlertTriangle, TrendingUp, TrendingDown, Minus } from "lucide-react";
 import { motion } from "framer-motion";
 import type { Sensor } from "../hooks/useWebSocket";
 
-// Minimal inline sparkline using SVG
 function Sparkline({ data, danger }: { data: number[]; danger: boolean }) {
   if (data.length < 2) return null;
   const min = Math.min(...data);
@@ -15,35 +14,26 @@ function Sparkline({ data, danger }: { data: number[]; danger: boolean }) {
     const y = H - ((v - min) / range) * H;
     return `${x},${y}`;
   }).join(" ");
-
   return (
     <svg width={W} height={H} className="overflow-visible">
-      <polyline
-        points={points}
-        fill="none"
+      <polyline points={points} fill="none"
         stroke={danger ? "#EF4444" : "#10B981"}
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-        opacity="0.8"
-      />
-      {/* Last point dot */}
+        strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" opacity="0.8" />
       {data.length > 0 && (
         <circle
-          cx={(( data.length - 1) / (data.length - 1)) * W}
+          cx={W}
           cy={H - ((data[data.length - 1] - min) / range) * H}
-          r="2"
-          fill={danger ? "#EF4444" : "#10B981"}
-        />
+          r="2" fill={danger ? "#EF4444" : "#10B981"} />
       )}
     </svg>
   );
 }
 
-function SensorCard({ id, sensor, history, danger, onHover, onLeave }: {
+function SensorCard({ id, sensor, history, trend, danger, onHover, onLeave }: {
   id: string;
   sensor: Sensor;
   history: number[];
+  trend: string;
   danger: boolean;
   onHover: () => void;
   onLeave: () => void;
@@ -78,7 +68,12 @@ function SensorCard({ id, sensor, history, danger, onHover, onLeave }: {
           {sensor.value.toFixed(1)}
         </motion.span>
         <span className="font-mono text-[12px] text-muted">{sensor.unit}</span>
-        <span className="ml-auto font-mono text-[9px] text-dim">{pct.toFixed(0)}%</span>
+        <div className="ml-auto flex items-center gap-1">
+          {trend.includes("RISING") && <TrendingUp size={9} className="text-critical" />}
+          {trend.includes("FALLING") && <TrendingDown size={9} className="text-safe" />}
+          {trend.includes("STABLE") && <Minus size={9} className="text-dim" />}
+          <span className="font-mono text-[9px] text-dim tabular-nums">{pct.toFixed(0)}%</span>
+        </div>
       </div>
 
       <p className="font-sans text-[10px] text-dim mb-1.5">{sensor.location}</p>
@@ -106,9 +101,12 @@ const HAZARD_BADGE: Record<string, string> = {
   CRITICAL: "text-critical border-critical/50 bg-critical/15",
 };
 
-export default function TelemetryPanel({ sensors, sensorHistory, hazardLevel, activeFires, chemicalThreat, onSensorHover }: {
+export default function TelemetryPanel({
+  sensors, sensorHistory, sensorTrends, hazardLevel, activeFires, chemicalThreat, onSensorHover
+}: {
   sensors: Record<string, Sensor>;
   sensorHistory: Record<string, number[]>;
+  sensorTrends: Record<string, string>;
   hazardLevel: string;
   activeFires: string[];
   chemicalThreat: string | null;
@@ -133,12 +131,12 @@ export default function TelemetryPanel({ sensors, sensorHistory, hazardLevel, ac
           <SensorCard
             key={id} id={id} sensor={s}
             history={sensorHistory[id] ?? [s.value]}
+            trend={sensorTrends[id] ?? "STABLE →"}
             danger={id === "Sensor_A" ? s.value > 150 : s.value > 80}
             onHover={() => onSensorHover(id)}
             onLeave={() => onSensorHover(null)}
           />
         ))}
-
         {activeFires.map(loc => (
           <div key={loc} className="flex items-center gap-2 px-3 py-2 border-b border-border bg-critical/5">
             <AlertTriangle size={10} className="text-critical" />

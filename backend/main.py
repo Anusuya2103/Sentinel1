@@ -257,6 +257,74 @@ async def get_audit_log():
     return state.get_state()["audit_log"]
 
 
+# ── Demo utilities ────────────────────────────────────────────────────────────
+
+@app.post("/debug/reset")
+async def reset_demo():
+    """
+    Reset all in-memory state for a clean demo run.
+    Clears incidents, actions, transcripts, audit log.
+    Does NOT stop the agent session.
+    """
+    s = state.get_state()
+    s["incidents"].clear()
+    s["actions"].clear()
+    s["transcripts"].clear()
+    s["audit_log"].clear()
+    s["active_fires"].clear()
+    s["chemical_threat"] = None
+    s["hazard_level"] = "MODERATE"
+    # Reset sensors to baseline
+    state.update_sensors("Sensor_A", 45.0)
+    state.update_sensors("Sensor_B", 18.0)
+    # Reset conflict engine flush time so it picks up new transcripts
+    import conflict_engine
+    conflict_engine._last_flush = 0.0
+
+    await ws_manager.broadcast("state_snapshot", state.get_state())
+    logger.info("Demo state reset")
+    return {"ok": True, "message": "State reset — ready for demo"}
+
+
+@app.post("/debug/run_demo")
+async def run_demo():
+    """
+    Auto-inject the full demo scenario for presentations.
+    Injects all transcripts with timing, then triggers spike.
+    """
+    import asyncio as _asyncio
+
+    async def _run():
+        transcripts = [
+            ("Fire_Chief", "This is Fire Chief. Warehouse B fire appears contained on the east side. I am moving my team in for assessment.", 0),
+            ("Traffic_Control", "Traffic Control here. North Gate is clear. Civilian evacuation is complete. Route is open for emergency vehicles.", 2),
+            ("Hazmat_Lead", "Hazmat Lead reporting. Sensor B is showing 42 parts per million chlorine at Chemical Storage. Elevated but monitoring.", 4),
+            ("Fire_Chief", "Team is entering Warehouse B now. No visible hazard. Proceeding with structural assessment.", 10),
+            ("Hazmat_Lead", "STOP. Do not enter. Sensor B just jumped to 78 parts per million. Wind is pushing chlorine plume toward Warehouse B. Fire Chief pull your team back immediately.", 12),
+            ("Traffic_Control", "I have two ambulances inbound through East Gate. Do not close that gate. Medical response will be blocked.", 16),
+            ("Hazmat_Lead", "East Gate must close. Toxicity is critical. Anyone near that entrance will be exposed. This is a mass casualty risk.", 18),
+            ("Fire_Chief", "We have a man down. One of my team collapsed near Chemical Storage. Requesting immediate medical evacuation.", 22),
+        ]
+
+        for responder_id, text, delay in transcripts:
+            await _asyncio.sleep(delay if delay == 0 else 2)
+            state.add_transcript(responder_id, text)
+            await ws_manager.broadcast("transcript", {
+                "responder_id": responder_id,
+                "text": text,
+                "timestamp": time.time(),
+                "source": "demo_auto",
+            })
+
+        # Trigger spike after all transcripts
+        await _asyncio.sleep(3)
+        sensors.trigger_spike()
+        logger.info("Demo scenario completed")
+
+    asyncio.create_task(_run())
+    return {"ok": True, "message": "Demo scenario started — watch the dashboard"}
+
+
 
 
 

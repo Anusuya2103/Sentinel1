@@ -5,6 +5,7 @@ export interface Transcript {
   text: string;
   timestamp: number;
   source: string;
+  latency_ms?: number;
 }
 
 export interface Sensor {
@@ -21,6 +22,7 @@ export interface Incident {
   source: string;
   corroborated_by: string[];
   conflict_detected: { with_incident_id: string; details: string } | null;
+  detected_at?: number;
 }
 
 export interface Action {
@@ -39,6 +41,7 @@ export interface ConflictAlert {
   description: string;
   conflict: { with_incident_id: string; details: string };
   confidence: number;
+  timestamp?: number;
 }
 
 export interface DashboardState {
@@ -48,15 +51,18 @@ export interface DashboardState {
   activeFires: string[];
   safeRoutes: string[];
   sensors: Record<string, Sensor>;
-  sensorHistory: Record<string, number[]>; // sparkline data — last 30 readings
+  sensorHistory: Record<string, number[]>;
+  sensorTrends: Record<string, string>;
   transcripts: Transcript[];
   incidents: Record<string, Incident>;
   actions: Record<string, Action>;
   activeConflict: ConflictAlert | null;
   agentStatus: string;
   agentSessionId: string | null;
-  lastTickMs: number | null; // last intelligence tick timestamp
+  lastTickMs: number | null;
+  lastConflictAt: number | null;
   incidentCount: number;
+  agentLatencyMs: number | null;
 }
 
 type Action_ =
@@ -75,6 +81,7 @@ const initial: DashboardState = {
     Sensor_B: { value: 15, unit: "ppm", location: "Chemical Storage" },
   },
   sensorHistory: { Sensor_A: [42], Sensor_B: [15] },
+  sensorTrends: { Sensor_A: "STABLE →", Sensor_B: "STABLE →" },
   transcripts: [],
   incidents: {},
   actions: {},
@@ -82,7 +89,9 @@ const initial: DashboardState = {
   agentStatus: "idle",
   agentSessionId: null,
   lastTickMs: null,
+  lastConflictAt: null,
   incidentCount: 0,
+  agentLatencyMs: null,
 };
 
 function appendHistory(history: number[], value: number): number[] {
@@ -131,6 +140,7 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
         case "telemetry_update": {
           const newSensors = { ...state.sensors, ...(p.sensors as Record<string, Sensor>) };
           const newHistory = { ...state.sensorHistory };
+          const newTrends = { ...state.sensorTrends, ...(p.sensor_trends as Record<string, string> ?? {}) };
           for (const [id, s] of Object.entries(p.sensors as Record<string, Sensor>)) {
             newHistory[id] = appendHistory(newHistory[id] ?? [], s.value);
           }
@@ -139,11 +149,19 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
             hazardLevel: (p.hazard_level as string) ?? state.hazardLevel,
             sensors: newSensors,
             sensorHistory: newHistory,
+            sensorTrends: newTrends,
           };
         }
 
         case "incident_update": {
-          const newIncidents = { ...state.incidents, ...(p.incidents as Record<string, Incident>) };
+          const incomingIncidents = p.incidents as Record<string, Incident> ?? {};
+          // Stamp detected_at on new incidents
+          const now = Date.now() / 1000;
+          const stamped: Record<string, Incident> = {};
+          for (const [id, inc] of Object.entries(incomingIncidents)) {
+            stamped[id] = { ...inc, detected_at: inc.detected_at ?? now };
+          }
+          const newIncidents = { ...state.incidents, ...stamped };
           return {
             ...state,
             hazardLevel: (p.hazard_level as string) ?? state.hazardLevel,
@@ -153,11 +171,16 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
             actions: { ...state.actions, ...(p.actions as Record<string, Action>) },
             lastTickMs: Date.now(),
             incidentCount: Object.keys(newIncidents).length,
+            sensorTrends: { ...state.sensorTrends, ...(p.sensor_trends as Record<string, string> ?? {}) },
           };
         }
 
         case "conflict_alert":
-          return { ...state, activeConflict: p as unknown as ConflictAlert };
+          return {
+            ...state,
+            activeConflict: p as unknown as ConflictAlert,
+            lastConflictAt: Date.now(),
+          };
 
         case "action_dispatched": {
           const aid = p.action_id as string;
@@ -185,6 +208,12 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
             agentSessionId: (p.session_id as string | null) ?? state.agentSessionId,
           };
         }
+
+        case "agent_metric":
+          return {
+            ...state,
+            agentLatencyMs: (p.latency_ms as number) ?? state.agentLatencyMs,
+          };
 
         default:
           return state;
