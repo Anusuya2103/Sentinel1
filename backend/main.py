@@ -295,6 +295,13 @@ async def run_demo():
     import asyncio as _asyncio
 
     async def _run():
+        if not agora_agent.get_active_session_id():
+            await agora_agent.create_agent_session()
+        await asyncio.sleep(2)
+        await agora_agent.send_think(
+            "Start the incident demo now. Say: Sentinel-1 AI online. Fire Chief, give me your initial status report."
+        )
+
         transcripts = [
             ("Fire_Chief", "This is Fire Chief. Warehouse B fire appears contained on the east side. I am moving my team in for assessment.", 0),
             ("Traffic_Control", "Traffic Control here. North Gate is clear. Civilian evacuation is complete. Route is open for emergency vehicles.", 2),

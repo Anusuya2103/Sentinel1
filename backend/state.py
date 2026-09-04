@@ -61,7 +61,11 @@ def merge_llm_result(result: dict[str, Any]) -> dict[str, Any]:
     if updates.get("active_fires"):
         # union — never remove fires via LLM alone
         existing = set(_state["active_fires"])
-        existing.update(updates["active_fires"])
+        for fire in updates["active_fires"]:
+            if isinstance(fire, dict):
+                fire = fire.get("location") or fire.get("description") or fire.get("name")
+            if fire:
+                existing.add(str(fire))
         _state["active_fires"] = list(existing)
         delta["active_fires"] = _state["active_fires"]
 

@@ -99,6 +99,19 @@ function appendHistory(history: number[], value: number): number[] {
   return next.length > 30 ? next.slice(-30) : next;
 }
 
+function normalizeChemicalThreat(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "object") {
+    const threat = value as Record<string, unknown>;
+    const note = typeof threat.note === "string" ? threat.note : null;
+    const ppm = typeof threat.current_ppm === "number" ? `${threat.current_ppm} ppm` : null;
+    const level = typeof threat.level === "string" ? threat.level : null;
+    return [level, ppm, note].filter(Boolean).join(" · ") || "Chemical threat detected";
+  }
+  return String(value);
+}
+
 function reducer(state: DashboardState, action: Action_): DashboardState {
   switch (action.type) {
     case "CONNECTED":
@@ -117,7 +130,7 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
           return {
             ...state,
             hazardLevel: (p.hazard_level as string) ?? state.hazardLevel,
-            chemicalThreat: (p.chemical_threat as string | null) ?? state.chemicalThreat,
+            chemicalThreat: normalizeChemicalThreat(p.chemical_threat) ?? state.chemicalThreat,
             activeFires: (p.active_fires as string[]) ?? state.activeFires,
             safeRoutes: (p.safe_routes as string[]) ?? state.safeRoutes,
             sensors: (p.sensors as Record<string, Sensor>) ?? state.sensors,
@@ -165,7 +178,7 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
           return {
             ...state,
             hazardLevel: (p.hazard_level as string) ?? state.hazardLevel,
-            chemicalThreat: (p.chemical_threat as string | null) ?? state.chemicalThreat,
+            chemicalThreat: normalizeChemicalThreat(p.chemical_threat) ?? state.chemicalThreat,
             activeFires: (p.active_fires as string[]) ?? state.activeFires,
             incidents: newIncidents,
             actions: { ...state.actions, ...(p.actions as Record<string, Action>) },

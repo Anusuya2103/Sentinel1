@@ -90,6 +90,8 @@ async def create_agent_session() -> str | None:
         state.set_agent_session(_active_session_id, "joining")
         logger.info("Agora agent session created: %s", _active_session_id)
 
+        asyncio.create_task(_wait_until_active(_active_session_id), name="agora_agent_status")
+
         await ws_manager.broadcast("agent_lifecycle", {
             "event": "created",
             "session_id": _active_session_id,
@@ -107,6 +109,31 @@ async def create_agent_session() -> str | None:
         return None
 
 
+async def _wait_until_active(session_id: str, attempts: int = 20) -> None:
+    """Promote local state when Agora is running, even without event webhooks."""
+    for _ in range(attempts):
+        await asyncio.sleep(1)
+        if session_id != _active_session_id:
+            return
+        status = await get_agent_status(session_id)
+        status_name = str((status or {}).get("status", "")).upper()
+        if status_name in {"RUNNING", "ACTIVE"}:
+            state.set_agent_session(session_id, "active")
+            await ws_manager.broadcast("agent_lifecycle", {
+                "event": "joined",
+                "session_id": session_id,
+                "data": status,
+            })
+            logger.info("Agora agent is active: %s", session_id)
+            return
+        if status_name in {"FAILED", "ERROR", "STOPPED"}:
+            state.set_agent_session(session_id, "error")
+            await ws_manager.broadcast("agent_lifecycle", {
+                "event": "error",
+                "session_id": session_id,
+                "data": status,
+            })
+            return
 async def recreate_with_new_tunnel(new_url: str) -> str | None:
     """
     Hot-recreate the agent session with a new tunnel URL.
