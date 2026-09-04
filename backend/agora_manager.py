@@ -9,7 +9,7 @@ import asyncio
 import logging
 import time
 
-from agora_agent import Agent, Agora, Area, AresSTT, CustomLLM, OpenAITTS
+from agora_agent import Agent, Agora, Area, DeepgramSTT, CustomLLM, OpenAITTS
 from agora_agent.core.api_error import ApiError
 
 import config
@@ -51,7 +51,8 @@ async def create_agent_session() -> str | None:
 
         agent = (
             Agent(client=client, turn_detection={"language": "en-US"})
-            .with_stt(AresSTT())
+            # Agora-managed Deepgram STT — more reliable than Ares, no key needed
+            .with_stt(DeepgramSTT(model="nova-2", language="en-US"))
             .with_llm(
                 CustomLLM(
                     base_url=llm_url,
@@ -59,9 +60,8 @@ async def create_agent_session() -> str | None:
                     api_key="sentinel-internal",
                     system_messages=[{"role": "system", "content": SYSTEM_PROMPT}],
                     greeting_message="Sentinel-1 AI online. Monitoring all channels.",
-                    failure_message="Standing by.",
                     max_history=20,
-                    max_tokens=120,
+                    max_tokens=150,
                 )
             )
             .with_tts(
@@ -181,4 +181,5 @@ async def get_agent_status(session_id: str | None = None) -> dict | None:
 
 def get_active_session_id() -> str | None:
     return _active_session_id
+
 

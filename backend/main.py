@@ -261,3 +261,38 @@ async def get_audit_log():
 
 
 
+
+
+
+
+# ── OpenAI-compat BYO-LLM webhook (Agora ConvoAI calls this per turn) ─────────
+
+@app.post("/v1/chat/completions")
+async def openai_compat_endpoint(payload: dict):
+    """
+    Agora ConvoAI Engine POST here each turn when CustomLLM vendor=custom.
+    Payload: {model, messages, stream, uid, turn_id, session_id, timestamp}
+    """
+    logger.info("LLM webhook hit keys=%s uid=%s turn=%s",
+        list(payload.keys()), payload.get("uid","?"), payload.get("turn_id","?"))
+    result = await handle_openai_compat(payload)
+    return result
+
+
+# ── Tunnel hot-update ─────────────────────────────────────────────────────────
+
+@app.post("/tunnel/update")
+async def update_tunnel(payload: dict):
+    """Hot-update LLM_WEBHOOK_PUBLIC_URL without restarting the backend."""
+    url = payload.get("url", "").strip().rstrip("/")
+    if not url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="URL must start with https://")
+    config.LLM_WEBHOOK_PUBLIC_URL = url
+    import os, re as _re
+    env_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    if os.path.exists(env_path):
+        txt = open(env_path).read()
+        txt = _re.sub(r"LLM_WEBHOOK_PUBLIC_URL=.*", f"LLM_WEBHOOK_PUBLIC_URL={url}", txt)
+        open(env_path, "w").write(txt)
+    logger.info("Tunnel URL updated: %s", url)
+    return {"ok": True, "llm_webhook": f"{url}/v1/chat/completions"}
