@@ -8,6 +8,7 @@ import TelemetryPanel from "./components/TelemetryPanel";
 import ZoneMap from "./components/ZoneMap";
 import InterventionHub from "./components/InterventionHub";
 import VoiceChannel from "./components/VoiceChannel";
+import IncidentTimeline from "./components/IncidentTimeline";
 import type { ConflictAlert } from "./hooks/useWebSocket";
 
 const BACKEND = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
@@ -223,13 +224,22 @@ export default function App() {
           <VoiceChannel role="Fire_Chief" />
         </div>
 
+        {/* COL 2: Intervention Hub + Timeline (6.5) */}
         <div className="border-r border-border flex flex-col min-h-0 overflow-hidden">
-          <InterventionHub
-            incidents={dash.incidents}
-            actions={dash.actions}
-            activeConflict={showConflict ? dash.activeConflict : null}
-            lastTickMs={dash.lastTickMs}
-          />
+          <div style={{ height: "62%" }} className="min-h-0 overflow-hidden border-b border-border">
+            <InterventionHub
+              incidents={dash.incidents}
+              actions={dash.actions}
+              activeConflict={showConflict ? dash.activeConflict : null}
+              lastTickMs={dash.lastTickMs}
+            />
+          </div>
+          <div style={{ height: "38%" }} className="min-h-0 overflow-hidden">
+            <IncidentTimeline
+              incidents={dash.incidents}
+              actions={dash.actions}
+            />
+          </div>
         </div>
 
         <div className="flex flex-col min-h-0 overflow-hidden">

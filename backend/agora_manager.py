@@ -1,7 +1,7 @@
 ﻿"""
 Agora Conversational AI Engine — agent session management.
 
-STT:  AresSTT    — Agora-managed, no key needed
+STT:  DeepgramSTT — Agora-managed, no key needed
 LLM:  CustomLLM  — BYO webhook to our Groq-powered /v1/chat/completions
 TTS:  OpenAITTS(model="tts-1") — Agora-managed preset, no key needed
 """
@@ -24,7 +24,9 @@ SYSTEM_PROMPT = (
     "You are Sentinel-1, the AI Incident Commander for a municipal industrial park "
     "emergency (chemical fire + gas leak). You are a live voice participant with "
     "Fire_Chief, Traffic_Control, and Hazmat_Lead. Keep replies under 2 sentences. "
-    "Never dispatch actions yourself — ask a named responder for approval first."
+    "Never dispatch actions yourself — ask a named responder for approval first. "
+    "When you detect a conflict between responders, immediately flag it by saying: "
+    "[Role], that contradicts [Other Role or Sensor] — please confirm before we proceed."
 )
 
 
@@ -38,6 +40,25 @@ def _make_client() -> Agora:
     )
 
 
+def _build_agent(llm_url: str) -> Agent:
+    return (
+        Agent(client=_make_client(), turn_detection={"language": "en-US"})
+        .with_stt(DeepgramSTT(model="nova-2", language="en-US"))
+        .with_llm(
+            CustomLLM(
+                base_url=llm_url,
+                model="sentinel-1",
+                api_key="sentinel-internal",
+                system_messages=[{"role": "system", "content": SYSTEM_PROMPT}],
+                greeting_message="Sentinel-1 AI online. Monitoring all channels. Awaiting situation report.",
+                max_history=20,
+                max_tokens=150,
+            )
+        )
+        .with_tts(OpenAITTS(model="tts-1", voice="nova"))
+    )
+
+
 async def create_agent_session() -> str | None:
     global _active_session_id
 
@@ -45,31 +66,10 @@ async def create_agent_session() -> str | None:
         logger.info("Agent session already active: %s", _active_session_id)
         return _active_session_id
 
+    llm_url = f"{config.LLM_WEBHOOK_PUBLIC_URL}/v1/chat/completions"
+
     try:
-        client = _make_client()
-        llm_url = f"{config.LLM_WEBHOOK_PUBLIC_URL}/v1/chat/completions"
-
-        agent = (
-            Agent(client=client, turn_detection={"language": "en-US"})
-            # Agora-managed Deepgram STT — more reliable than Ares, no key needed
-            .with_stt(DeepgramSTT(model="nova-2", language="en-US"))
-            .with_llm(
-                CustomLLM(
-                    base_url=llm_url,
-                    model="sentinel-1",
-                    api_key="sentinel-internal",
-                    system_messages=[{"role": "system", "content": SYSTEM_PROMPT}],
-                    greeting_message="Sentinel-1 AI online. Monitoring all channels.",
-                    max_history=20,
-                    max_tokens=150,
-                )
-            )
-            .with_tts(
-                # Agora-managed OpenAI TTS preset — no separate key required
-                OpenAITTS(model="tts-1", voice="nova")
-            )
-        )
-
+        agent = _build_agent(llm_url)
         session = agent.create_session(
             channel=config.CHANNEL_NAME,
             agent_uid=config.AGENT_UID,
@@ -105,6 +105,26 @@ async def create_agent_session() -> str | None:
         logger.exception("Failed to create agent session: %s", exc)
         state.set_agent_session(None, "error")
         return None
+
+
+async def recreate_with_new_tunnel(new_url: str) -> str | None:
+    """
+    Hot-recreate the agent session with a new tunnel URL.
+    Called automatically when /tunnel/update is hit.
+    """
+    global _active_session_id
+    old_sid = _active_session_id
+
+    # Stop old session gracefully
+    if old_sid:
+        await stop_agent_session(old_sid)
+        await asyncio.sleep(2)
+
+    # Update config
+    config.LLM_WEBHOOK_PUBLIC_URL = new_url
+    logger.info("Recreating agent with new tunnel: %s", new_url)
+
+    return await create_agent_session()
 
 
 async def stop_agent_session(session_id: str | None = None) -> bool:
@@ -146,7 +166,40 @@ async def interrupt_agent(session_id: str | None = None) -> bool:
         await ws_manager.broadcast("agent_interrupted", {"session_id": sid})
         return True
     except Exception as exc:
-        logger.exception("Failed to interrupt agent: %s", exc)
+        logger.warning("Failed to interrupt agent (non-fatal): %s", exc)
+        return False
+
+
+async def send_think(message: str, session_id: str | None = None) -> bool:
+    """
+    Inject a message into the agent's thinking pipeline.
+    Use this to force the agent to say something specific on its next turn.
+    Agora's 'think' endpoint inserts text as if it came from the user pipeline.
+    """
+    sid = session_id or _active_session_id
+    if not sid:
+        logger.warning("send_think called but no active session")
+        return False
+    try:
+        import httpx, base64
+        base_url = f"https://api-us-west-1.agora.io/api/conversational-ai-agent/v2/projects/{config.AGORA_APP_ID}"
+        creds = base64.b64encode(f"{config.AGORA_CUSTOMER_ID}:{config.AGORA_CUSTOMER_SECRET}".encode()).decode()
+        headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                f"{base_url}/agents/{sid}/think",
+                headers=headers,
+                json={"message": message}
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Agent think injected: %s", message[:60])
+                return True
+            else:
+                logger.warning("Think API returned %s: %s", resp.status_code, resp.text[:100])
+                return False
+    except Exception as exc:
+        logger.warning("send_think failed (non-fatal): %s", exc)
         return False
 
 
@@ -162,16 +215,13 @@ async def get_agent_status(session_id: str | None = None) -> dict | None:
         )
         if result is None:
             return None
-        # Normalize to dict and extract status field
         if not isinstance(result, dict):
             try:
                 result = vars(result)
             except Exception:
                 result = {}
-        # Agora SDK wraps the response — unwrap agent field if present
         if "agent" in result:
             result = result["agent"]
-        # Log full result once for debugging
         logger.debug("Agent status raw: %s", result)
         return result
     except Exception as exc:
@@ -181,5 +231,3 @@ async def get_agent_status(session_id: str | None = None) -> dict | None:
 
 def get_active_session_id() -> str | None:
     return _active_session_id
-
-

@@ -364,3 +364,18 @@ async def update_tunnel(payload: dict):
         open(env_path, "w").write(txt)
     logger.info("Tunnel URL updated: %s", url)
     return {"ok": True, "llm_webhook": f"{url}/v1/chat/completions"}
+
+
+# ── Verbal approval event passthrough ─────────────────────────────────────────
+
+@app.post("/agent/think")
+async def agent_think(payload: dict):
+    """
+    Inject a message into the agent's thinking pipeline.
+    Body: {"message": "say this verbally"}
+    """
+    message = payload.get("message", "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message required")
+    ok = await agora_agent.send_think(message)
+    return {"ok": ok, "message": message}

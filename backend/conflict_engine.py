@@ -1,6 +1,6 @@
 ﻿"""
 Conflict Engine — background tick (CONFLICT_TICK_SECONDS).
-Deep structured JSON analysis. Uses Groq SDK directly.
+Deep structured JSON analysis + verbal HITL approval detection.
 """
 import asyncio
 import json
@@ -19,6 +19,12 @@ from ws_hub import manager as ws_manager
 logger = logging.getLogger("sentinel1.conflict_engine")
 
 _client = AsyncGroq(api_key=config.GROQ_API_KEY)
+
+# Keywords that indicate verbal HITL approval
+APPROVAL_KEYWORDS = [
+    "confirmed", "confirm", "approved", "approve", "go ahead", "go-ahead",
+    "affirmative", "roger that", "proceed", "execute", "dispatch", "authorize"
+]
 
 ANALYSIS_PROMPT = """\
 You are the Sentinel-1 AI Core analyzing an active emergency incident.
@@ -42,8 +48,8 @@ CONFIDENCE SCORING:
 - +30% if corroborated by sensor telemetry or another authority
 - -50% if directly contradicted by sensor readings
 
-CRITICAL: You MUST output ONLY valid JSON. No prose, no markdown, no explanation.
-If there are no incidents, output the schema with empty arrays.
+CRITICAL: Output ONLY valid JSON. No prose, no markdown, no explanation.
+If no incidents, output the schema with empty arrays.
 
 OUTPUT THIS EXACT JSON:
 {{
@@ -78,6 +84,7 @@ OUTPUT THIS EXACT JSON:
 
 _last_flush: float = 0.0
 _sensor_history: dict[str, list[float]] = {"Sensor_A": [], "Sensor_B": []}
+_pending_verbal_approvals: dict[str, dict] = {}  # action_id -> action info
 
 
 def _get_trend(sensor_id: str, current: float) -> str:
@@ -86,10 +93,10 @@ def _get_trend(sensor_id: str, current: float) -> str:
         return "STABLE"
     recent_avg = sum(history[-3:]) / 3
     if current > recent_avg * 1.05:
-        return "RISING ↑"
+        return "RISING"
     elif current < recent_avg * 0.95:
-        return "FALLING ↓"
-    return "STABLE →"
+        return "FALLING"
+    return "STABLE"
 
 
 def _update_sensor_history(sensor_id: str, value: float) -> None:
@@ -98,6 +105,15 @@ def _update_sensor_history(sensor_id: str, value: float) -> None:
     _sensor_history[sensor_id].append(value)
     if len(_sensor_history[sensor_id]) > 20:
         _sensor_history[sensor_id] = _sensor_history[sensor_id][-20:]
+
+
+def register_verbal_approval(action_id: str, action_info: dict) -> None:
+    """Register an action as awaiting verbal approval from a named responder."""
+    _pending_verbal_approvals[action_id] = {
+        **action_info,
+        "registered_at": time.time(),
+    }
+    logger.info("Registered verbal approval listener for action: %s", action_id)
 
 
 async def run_conflict_engine() -> None:
@@ -123,9 +139,12 @@ async def _tick() -> None:
     sensor_a = s["sensors"]["Sensor_A"]
     sensor_b = s["sensors"]["Sensor_B"]
 
-    # Update history for trend calculation
+    # Update sensor history
     _update_sensor_history("Sensor_A", sensor_a["value"])
     _update_sensor_history("Sensor_B", sensor_b["value"])
+
+    # Check for verbal HITL approvals in new transcripts
+    await _check_verbal_approvals(new_transcripts)
 
     prompt = ANALYSIS_PROMPT.format(
         hazard_level=s["hazard_level"],
@@ -154,24 +173,98 @@ async def _tick() -> None:
         }
         await ws_manager.broadcast("incident_update", delta)
 
+    # Register new actions for verbal approval listening
+    for action in result.get("recommended_actions", []):
+        if action.get("critical") and action["action_id"] not in _pending_verbal_approvals:
+            register_verbal_approval(action["action_id"], action)
+
     # Handle P1 critical conflicts
-    for incident in result.get("extracted_incidents", []):
-        if incident.get("conflict_detected") and incident.get("priority") == "P1_CRITICAL":
-            conflict_details = incident["conflict_detected"]["details"]
-            logger.warning("P1 CONFLICT: %s", conflict_details)
+    p1_conflicts = [
+        inc for inc in result.get("extracted_incidents", [])
+        if inc.get("conflict_detected") and inc.get("priority") == "P1_CRITICAL"
+    ]
 
-            await ws_manager.broadcast("conflict_alert", {
-                "incident_id": incident["id"],
-                "description": incident["description"],
-                "conflict": incident["conflict_detected"],
-                "confidence": incident["confidence"],
-                "timestamp": time.time(),
-            })
+    for incident in p1_conflicts:
+        conflict_details = incident["conflict_detected"]["details"]
+        logger.warning("P1 CONFLICT: %s", conflict_details)
 
-            # Interrupt agent so it can verbally raise the conflict
-            interrupted = await agora_agent.interrupt_agent()
-            if interrupted:
-                logger.info("Agent interrupted for P1 conflict")
+        await ws_manager.broadcast("conflict_alert", {
+            "incident_id": incident["id"],
+            "description": incident["description"],
+            "conflict": incident["conflict_detected"],
+            "confidence": incident["confidence"],
+            "timestamp": time.time(),
+        })
+
+        # Step 1: Interrupt the agent mid-response
+        await agora_agent.interrupt_agent()
+
+        # Step 2: Inject a think message so the agent says exactly the right thing
+        # Build a targeted verbal conflict flag
+        role_a = incident["source"].replace("_", " ")
+        think_msg = (
+            f"URGENT: Flag this conflict immediately in your next response. "
+            f"Say: '{role_a}, Sensor B is reading critical levels — "
+            f"that contradicts your last report. All teams hold position. "
+            f"Hazmat Lead, please confirm current toxicity reading.'"
+        )
+        await asyncio.sleep(0.5)  # Brief pause after interrupt
+        await agora_agent.send_think(think_msg)
+
+        logger.info("Conflict interrupt + think injection sent for incident %s", incident["id"])
+
+
+async def _check_verbal_approvals(transcripts: list[dict]) -> None:
+    """
+    Scan new transcripts for verbal approval keywords.
+    If found and there are pending actions awaiting approval, auto-dispatch them.
+    """
+    if not _pending_verbal_approvals:
+        return
+
+    for transcript in transcripts:
+        text_lower = transcript["text"].lower()
+        speaker = transcript["responder_id"]
+
+        # Check for approval keywords
+        if any(kw in text_lower for kw in APPROVAL_KEYWORDS):
+            # Find the most recent pending action
+            pending = sorted(
+                _pending_verbal_approvals.items(),
+                key=lambda x: x[1].get("registered_at", 0),
+                reverse=True
+            )
+
+            for action_id, action_info in pending:
+                # Check if action still exists and is pending
+                current_actions = state.get_state()["actions"]
+                if action_id in current_actions and current_actions[action_id]["status"] == "DRAFT_PENDING_APPROVAL":
+                    logger.info(
+                        "VERBAL APPROVAL DETECTED from %s: '%s' → dispatching %s",
+                        speaker, transcript["text"][:50], action_id
+                    )
+
+                    # Import actions here to avoid circular imports
+                    import actions as actions_module
+                    result = await actions_module.approve_and_dispatch(
+                        action_id,
+                        f"{speaker}_verbal"
+                    )
+
+                    if result["ok"]:
+                        # Remove from pending
+                        _pending_verbal_approvals.pop(action_id, None)
+
+                        # Broadcast the verbal approval event
+                        await ws_manager.broadcast("verbal_approval", {
+                            "action_id": action_id,
+                            "approved_by": speaker,
+                            "utterance": transcript["text"],
+                            "timestamp": time.time(),
+                        })
+
+                        logger.info("Verbal approval dispatched action %s by %s", action_id, speaker)
+                    break  # Only dispatch one action per utterance
 
 
 async def _call_analysis_llm(prompt: str) -> dict[str, Any] | None:
@@ -182,30 +275,26 @@ async def _call_analysis_llm(prompt: str) -> dict[str, Any] | None:
                 model=model,
                 messages=messages,
                 max_tokens=1500,
-                temperature=0.05,  # Lower temperature = more consistent JSON
+                temperature=0.05,
             )
             raw = resp.choices[0].message.content or ""
             parsed = _parse_json(raw)
             if parsed:
                 return parsed
-            logger.warning("JSON parse failed on %s, raw: %.150s", model, raw)
+            logger.warning("JSON parse failed on %s", model)
         except Exception as exc:
             logger.warning("LLM call failed on %s: %s", model, exc)
-    logger.error("Both models failed for conflict analysis")
     return None
 
 
 def _parse_json(raw: str) -> dict[str, Any] | None:
-    # Strip markdown fences
     cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
     cleaned = re.sub(r"\s*```$", "", cleaned.strip(), flags=re.MULTILINE)
-    # Find first complete JSON object
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if match:
         cleaned = match.group(0)
     try:
         result = json.loads(cleaned)
-        # Validate required keys
         if "extracted_incidents" not in result:
             result["extracted_incidents"] = []
         if "recommended_actions" not in result:
