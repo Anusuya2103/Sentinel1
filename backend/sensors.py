@@ -24,6 +24,7 @@ _sensors = {
 }
 
 _spike_pending: bool = False
+_active_spikes: set[str] = set()
 _spike_triggered_at: float | None = None
 
 # Spike targets (demo-scripted values that push hazard to CRITICAL)
@@ -40,6 +41,36 @@ def trigger_spike() -> dict:
     _spike_triggered_at = time.time()
     logger.info("Sensor spike queued — will apply on next tick")
     return {"status": "spike_queued", "targets": SPIKE_VALUES}
+
+
+async def apply_spike_now() -> dict:
+    """Apply the deterministic spike immediately for synchronized demo steps."""
+    global _spike_pending, _spike_triggered_at
+    _spike_pending = False
+    _active_spikes.update(SPIKE_VALUES)
+    _spike_triggered_at = time.time()
+    await _tick()
+    return {"status": "spike_applied", "targets": SPIKE_VALUES}
+
+
+async def apply_sensor_spike_now(sensor_id: str) -> dict:
+    """Apply and hold one demo sensor spike without changing the other sensor."""
+    if sensor_id not in SPIKE_VALUES:
+        raise ValueError(f"Unknown sensor: {sensor_id}")
+    _active_spikes.add(sensor_id)
+    await _tick()
+    return {"status": "spike_applied", "sensor": sensor_id, "value": SPIKE_VALUES[sensor_id]}
+
+
+def reset() -> None:
+    """Restore simulator values and clear any active demo spike."""
+    global _spike_pending, _active_spikes, _spike_triggered_at
+    _spike_pending = False
+    _active_spikes.clear()
+    _spike_triggered_at = None
+    for sensor_id, cfg in _sensors.items():
+        baseline = 45.0 if sensor_id == "Sensor_A" else 18.0
+        cfg["value"] = baseline
 
 
 async def run_sensors() -> None:
@@ -61,7 +92,7 @@ async def _tick() -> None:
     telemetry: dict = {}
 
     for sensor_id, cfg in _sensors.items():
-        if _spike_pending:
+        if _spike_pending or sensor_id in _active_spikes:
             # Apply scripted spike
             new_val = SPIKE_VALUES[sensor_id]
         else:

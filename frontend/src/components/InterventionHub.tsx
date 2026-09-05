@@ -64,6 +64,7 @@ interface InterventionCardProps {
 }
 
 function InterventionCard({ incident, relatedActions, onApprove, dispatching }: InterventionCardProps) {
+  const corroboratedBy = Array.isArray(incident.corroborated_by) ? incident.corroborated_by : [];
   const cfg = PRIORITY_CFG[incident.priority] ?? PRIORITY_CFG.P3_ADVISORY;
   const Icon = incident.priority === "P3_ADVISORY" ? Info : ShieldAlert;
   const hasConflict = Boolean(incident.conflict_detected);
@@ -76,8 +77,8 @@ function InterventionCard({ incident, relatedActions, onApprove, dispatching }: 
   // Extract opposing roles from source/conflict
   const roleA = incident.source;
   const roleB = incident.conflict_detected?.with_incident_id
-    ? incident.corroborated_by[0] ?? "Sensor Data"
-    : incident.corroborated_by[0] ?? "AI Analysis";
+    ? corroboratedBy[0] ?? "Sensor Data"
+    : corroboratedBy[0] ?? "AI Analysis";
 
   const draftActions = relatedActions.filter(a => a.status === "DRAFT_PENDING_APPROVAL");
   const dispatchedActions = relatedActions.filter(a => a.status === "DISPATCHED");
@@ -138,9 +139,9 @@ function InterventionCard({ incident, relatedActions, onApprove, dispatching }: 
             ⚠ {impactStatement}
           </p>
         )}
-        {incident.corroborated_by.length > 0 && (
+        {corroboratedBy.length > 0 && (
           <p className="font-mono text-[10px] text-safe mt-1">
-            ✓ Corroborated by: {incident.corroborated_by.map(r => r.replace(/_/g, " ")).join(", ")}
+            ✓ Corroborated by: {corroboratedBy.map(r => r.replace(/_/g, " ")).join(", ")}
           </p>
         )}
       </div>

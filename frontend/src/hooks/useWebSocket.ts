@@ -63,6 +63,7 @@ export interface DashboardState {
   lastConflictAt: number | null;
   incidentCount: number;
   agentLatencyMs: number | null;
+  demoComplete: boolean;
 }
 
 type Action_ =
@@ -92,11 +93,33 @@ const initial: DashboardState = {
   lastConflictAt: null,
   incidentCount: 0,
   agentLatencyMs: null,
+  demoComplete: false,
 };
+
+const spokenDemoLines = new Set<string>();
+let demoCompletionTimer: ReturnType<typeof setTimeout> | null = null;
 
 function appendHistory(history: number[], value: number): number[] {
   const next = [...history, value];
   return next.length > 30 ? next.slice(-30) : next;
+}
+
+function dedupeTranscripts(transcripts: Transcript[]): Transcript[] {
+  const seen = new Set<string>();
+  return transcripts.filter((transcript) => {
+    const key = `${transcript.timestamp}-${transcript.responder_id}-${transcript.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeIncident(incident: Incident): Incident {
+  return {
+    ...incident,
+    corroborated_by: Array.isArray(incident.corroborated_by) ? incident.corroborated_by : [],
+    conflict_detected: incident.conflict_detected ?? null,
+  };
 }
 
 function normalizeChemicalThreat(value: unknown): string | null {
@@ -125,8 +148,17 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
       switch (event) {
         case "state_snapshot": {
           const snapTranscripts = (p.transcripts as Transcript[] | undefined) ?? [];
-          const existingKeys = new Set(state.transcripts.map(t => `${t.timestamp}-${t.responder_id}`));
-          const newFromSnap = snapTranscripts.filter(t => !existingKeys.has(`${t.timestamp}-${t.responder_id}`));
+          if (snapTranscripts.length === 0) {
+            spokenDemoLines.clear();
+            if (demoCompletionTimer) {
+              clearTimeout(demoCompletionTimer);
+              demoCompletionTimer = null;
+            }
+          }
+          const snapshotIncidents = p.incidents as Record<string, Incident> ?? {};
+          const normalizedSnapshotIncidents = Object.fromEntries(
+            Object.entries(snapshotIncidents).map(([id, incident]) => [id, normalizeIncident(incident)])
+          );
           return {
             ...state,
             hazardLevel: (p.hazard_level as string) ?? state.hazardLevel,
@@ -134,25 +166,23 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
             activeFires: (p.active_fires as string[]) ?? state.activeFires,
             safeRoutes: (p.safe_routes as string[]) ?? state.safeRoutes,
             sensors: (p.sensors as Record<string, Sensor>) ?? state.sensors,
-            incidents: (p.incidents as Record<string, Incident>) ?? state.incidents,
+            incidents: normalizedSnapshotIncidents,
             actions: (p.actions as Record<string, Action>) ?? state.actions,
             agentStatus: (p.agent_status as string) ?? state.agentStatus,
             agentSessionId: (p.agent_session_id as string | null) ?? state.agentSessionId,
-            transcripts: [...state.transcripts, ...newFromSnap].slice(-200),
-            incidentCount: Object.keys((p.incidents as Record<string, Incident>) ?? {}).length,
+            transcripts: dedupeTranscripts(snapTranscripts).slice(-200),
+            incidentCount: Object.keys(normalizedSnapshotIncidents).length,
+            demoComplete: false,
           };
         }
+
+        case "demo_complete":
+          return { ...state, demoComplete: true };
 
         case "transcript": {
           const t = p as unknown as Transcript;
           const key = `${t.timestamp}-${t.responder_id}`;
           if (state.transcripts.some(x => `${x.timestamp}-${x.responder_id}` === key)) return state;
-          if (t.source === "demo_auto" && "speechSynthesis" in window) {
-            const utterance = new SpeechSynthesisUtterance(t.text);
-            utterance.rate = 0.95;
-            utterance.pitch = 1;
-            window.speechSynthesis.speak(utterance);
-          }
           return { ...state, transcripts: [...state.transcripts.slice(-199), t] };
         }
 
@@ -178,7 +208,7 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
           const now = Date.now() / 1000;
           const stamped: Record<string, Incident> = {};
           for (const [id, inc] of Object.entries(incomingIncidents)) {
-            stamped[id] = { ...inc, detected_at: inc.detected_at ?? now };
+            stamped[id] = { ...normalizeIncident(inc), detected_at: inc.detected_at ?? now };
           }
           const newIncidents = { ...state.incidents, ...stamped };
           return {
@@ -267,7 +297,33 @@ export function useWebSocket() {
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown };
-        dispatch({ type: "WS_EVENT", event: msg.type, payload: msg.payload as Record<string, unknown> });
+        const payload = msg.payload as Record<string, unknown>;
+        if (msg.type === "demo_complete" && "speechSynthesis" in window) {
+          const showCompletion = () => {
+            if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+              demoCompletionTimer = setTimeout(showCompletion, 500);
+              return;
+            }
+            dispatch({ type: "WS_EVENT", event: msg.type, payload });
+          };
+          if (demoCompletionTimer) clearTimeout(demoCompletionTimer);
+          showCompletion();
+          return;
+        }
+        if (msg.type === "transcript" && payload.source === "demo_auto" && "speechSynthesis" in window) {
+          const transcript = payload as unknown as Transcript;
+          const speechKey = `${transcript.responder_id}:${transcript.text}`;
+          if (spokenDemoLines.has(speechKey)) return;
+          spokenDemoLines.add(speechKey);
+          const utterance = new SpeechSynthesisUtterance(transcript.text);
+          utterance.rate = 1.1;
+          utterance.pitch = 1;
+          utterance.onstart = () => dispatch({ type: "WS_EVENT", event: msg.type, payload });
+          utterance.onerror = () => dispatch({ type: "WS_EVENT", event: msg.type, payload });
+          window.speechSynthesis.speak(utterance);
+          return;
+        }
+        dispatch({ type: "WS_EVENT", event: msg.type, payload });
       } catch { /* ignore */ }
     };
   }, []);

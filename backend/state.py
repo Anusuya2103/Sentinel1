@@ -44,6 +44,7 @@ def update_sensors(sensor_id: str, value: float) -> None:
     if sensor_id in _state["sensors"]:
         _state["sensors"][sensor_id]["value"] = round(value, 2)
         _state["sensors"][sensor_id]["timestamp"] = time.time()
+        _recalc_hazard_level()
 
 
 def merge_llm_result(result: dict[str, Any]) -> dict[str, Any]:

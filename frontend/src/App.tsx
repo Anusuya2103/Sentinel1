@@ -1,5 +1,5 @@
 ﻿import { useState, useEffect } from "react";
-import { Shield, Radio, Activity, Clock, Zap, AlertTriangle, Play, RotateCcw } from "lucide-react";
+import { Shield, Radio, Activity, Clock, Zap, AlertTriangle, Play, RotateCcw, CheckCircle2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWebSocket } from "./hooks/useWebSocket";
 import AgentControls from "./components/AgentControls";
@@ -29,7 +29,7 @@ function DemoControls() {
     try {
       const response = await fetch(`${BACKEND}/debug/run_demo`, { method: "POST" });
       if (!response.ok) throw new Error("Demo request failed");
-      setTimeout(() => setRunning(false), 30000);
+      setTimeout(() => setRunning(false), 150000);
     } catch { setRunning(false); }
   }
 
@@ -53,6 +53,51 @@ function DemoControls() {
         {running ? "Running..." : "Auto Demo"}
       </button>
     </div>
+  );
+}
+
+function MissionCompleteOverlay({ onReset }: { onReset: () => Promise<void> }) {
+  const [resetting, setResetting] = useState(false);
+
+  async function resetMission() {
+    setResetting(true);
+    await onReset();
+    setResetting(false);
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-base/95 px-6"
+    >
+      <motion.div
+        initial={{ scale: 0.94, y: 12 }}
+        animate={{ scale: 1, y: 0 }}
+        transition={{ duration: 0.3 }}
+        className="w-full max-w-xl border border-safe/50 bg-surface p-8 text-center shadow-[0_0_60px_rgba(16,185,129,0.16)]"
+      >
+        <CheckCircle2 size={48} className="mx-auto text-safe" />
+        <p className="mt-5 font-mono text-[11px] tracking-[0.3em] text-safe">MISSION STATUS</p>
+        <h2 className="mt-2 font-mono text-3xl font-bold tracking-wide text-text">SUCCESSFULLY COMPLETED</h2>
+        <p className="mx-auto mt-4 max-w-md font-sans text-sm leading-relaxed text-muted">
+          Incident scenario completed. Sensor escalation was detected, the conflict was surfaced, and the response remained under human control.
+        </p>
+        <div className="mt-6 grid grid-cols-3 gap-2 border-y border-border py-4 font-mono text-[10px] text-dim">
+          <span>THREAT DETECTED</span>
+          <span>CONFLICT RESOLVED</span>
+          <span>HITL ENFORCED</span>
+        </div>
+        <button
+          onClick={resetMission}
+          disabled={resetting}
+          className="mt-6 inline-flex items-center gap-2 border border-safe/50 px-4 py-2 font-mono text-[10px] uppercase tracking-wide text-safe transition-all hover:bg-safe hover:text-base disabled:opacity-50"
+        >
+          <RotateCcw size={11} className={resetting ? "animate-spin" : ""} />
+          {resetting ? "Resetting" : "Run Another Mission"}
+        </button>
+      </motion.div>
+    </motion.div>
   );
 }
 
@@ -287,6 +332,11 @@ export default function App() {
         </div>
         <span className="ml-auto font-mono text-[10px] text-dim">EchoSphere 2025 · Agora ConvoAI</span>
       </footer>
+      {dash.demoComplete && (
+        <MissionCompleteOverlay onReset={async () => {
+          await fetch(`${BACKEND}/debug/reset`, { method: "POST" });
+        }} />
+      )}
     </div>
   );
 }

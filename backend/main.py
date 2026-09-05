@@ -283,7 +283,8 @@ async def reset_demo():
     s["active_fires"].clear()
     s["chemical_threat"] = None
     s["hazard_level"] = "MODERATE"
-    # Reset sensors to baseline
+    # Reset both dashboard state and simulator internals to baseline.
+    sensors.reset()
     state.update_sensors("Sensor_A", 45.0)
     state.update_sensors("Sensor_B", 18.0)
     # Reset conflict engine flush time so it picks up new transcripts
@@ -312,9 +313,14 @@ async def run_demo():
             if not agora_agent.get_active_session_id():
                 await agora_agent.create_agent_session()
             await asyncio.sleep(2)
-            await agora_agent.send_think(
-                "Start the incident demo now. Say: Sentinel-1 AI online. Fire Chief, give me your initial status report."
+            opening = state.add_transcript(
+                "Sentinel-1-AI",
+                "Sentinel-1 AI online. Fire Chief, give me your initial status report.",
             )
+            await ws_manager.broadcast("transcript", {
+                **opening,
+                "source": "demo_auto",
+            })
 
             transcripts = [
                 ("Fire_Chief", "This is Fire Chief. Warehouse B fire appears contained on the east side. I am moving my team in for assessment."),
@@ -328,13 +334,16 @@ async def run_demo():
             ]
 
             for index, (responder_id, text) in enumerate(transcripts):
-                await _asyncio.sleep(2)
+                await _asyncio.sleep(12)
+                apply_fire_spike_after_transcript = False
                 if index == 2:
                     sensor_value = state.get_state()["sensors"]["Sensor_B"]["value"]
                     text = f"Hazmat Lead reporting. Sensor B is showing {sensor_value:g} parts per million chlorine at Chemical Storage. Elevated but monitoring."
+                elif index == 3:
+                    text = "Team is entering Warehouse B now. Fire sensor temperature is rising. No visible hazard yet, but we are proceeding with structural assessment."
+                    apply_fire_spike_after_transcript = True
                 elif index == 4:
-                    sensors.trigger_spike()
-                    await _asyncio.sleep(3)
+                    await sensors.apply_sensor_spike_now("Sensor_B")
                     sensor_value = state.get_state()["sensors"]["Sensor_B"]["value"]
                     text = f"STOP. Do not enter. Sensor B is now {sensor_value:g} parts per million. Wind is pushing chlorine plume toward Warehouse B. Fire Chief pull your team back immediately."
 
@@ -343,13 +352,13 @@ async def run_demo():
                     **entry,
                     "source": "demo_auto",
                 })
-                spoken = await agora_agent.send_think(
-                    f'Simulate the responder {responder_id} speaking on the radio. '
-                    f'Say exactly this aloud, without commentary: "{text}"'
-                )
-                if not spoken:
-                    logger.warning("Could not voice demo line for %s", responder_id)
+                if apply_fire_spike_after_transcript:
+                    await sensors.apply_sensor_spike_now("Sensor_A")
 
+            await ws_manager.broadcast("demo_complete", {
+                "completed_at": time.time(),
+                "message": "Auto Demo complete — review and approve the pending action.",
+            })
             logger.info("Demo scenario completed")
         except asyncio.CancelledError:
             logger.info("Demo scenario cancelled")
