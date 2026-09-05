@@ -145,6 +145,12 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
 
         case "transcript": {
           const t = p as unknown as Transcript;
+          if (t.source === "demo_auto" && "speechSynthesis" in window) {
+            const utterance = new SpeechSynthesisUtterance(t.text);
+            utterance.rate = 0.95;
+            utterance.pitch = 1;
+            window.speechSynthesis.speak(utterance);
+          }
           const key = `${t.timestamp}-${t.responder_id}`;
           if (state.transcripts.some(x => `${x.timestamp}-${x.responder_id}` === key)) return state;
           return { ...state, transcripts: [...state.transcripts.slice(-199), t] };

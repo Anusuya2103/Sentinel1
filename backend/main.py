@@ -322,6 +322,12 @@ async def run_demo():
                 "timestamp": time.time(),
                 "source": "demo_auto",
             })
+            spoken = await agora_agent.send_think(
+                f'Simulate the responder {responder_id} speaking on the radio. '
+                f'Say exactly this aloud, without commentary: "{text}"'
+            )
+            if not spoken:
+                logger.warning("Could not voice demo line for %s", responder_id)
 
         # Trigger spike after all transcripts
         await _asyncio.sleep(3)

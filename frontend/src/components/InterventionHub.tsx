@@ -66,11 +66,11 @@ interface InterventionCardProps {
 function InterventionCard({ incident, relatedActions, onApprove, dispatching }: InterventionCardProps) {
   const cfg = PRIORITY_CFG[incident.priority] ?? PRIORITY_CFG.P3_ADVISORY;
   const Icon = incident.priority === "P3_ADVISORY" ? Info : ShieldAlert;
-  const hasConflict = incident.conflict_detected !== null;
+  const hasConflict = Boolean(incident.conflict_detected);
 
   // Build a human-readable impact statement
   const impactStatement = hasConflict
-    ? incident.conflict_detected!.details
+    ? incident.conflict_detected?.details ?? incident.description
     : incident.description;
 
   // Extract opposing roles from source/conflict

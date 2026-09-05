@@ -25,8 +25,10 @@ function DemoControls() {
 
   async function runDemo() {
     setRunning(true);
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     try {
-      await fetch(`${BACKEND}/debug/run_demo`, { method: "POST" });
+      const response = await fetch(`${BACKEND}/debug/run_demo`, { method: "POST" });
+      if (!response.ok) throw new Error("Demo request failed");
       setTimeout(() => setRunning(false), 30000);
     } catch { setRunning(false); }
   }
