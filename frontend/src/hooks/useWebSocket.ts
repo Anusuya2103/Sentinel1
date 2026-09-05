@@ -145,14 +145,14 @@ function reducer(state: DashboardState, action: Action_): DashboardState {
 
         case "transcript": {
           const t = p as unknown as Transcript;
+          const key = `${t.timestamp}-${t.responder_id}`;
+          if (state.transcripts.some(x => `${x.timestamp}-${x.responder_id}` === key)) return state;
           if (t.source === "demo_auto" && "speechSynthesis" in window) {
             const utterance = new SpeechSynthesisUtterance(t.text);
             utterance.rate = 0.95;
             utterance.pitch = 1;
             window.speechSynthesis.speak(utterance);
           }
-          const key = `${t.timestamp}-${t.responder_id}`;
-          if (state.transcripts.some(x => `${x.timestamp}-${x.responder_id}` === key)) return state;
           return { ...state, transcripts: [...state.transcripts.slice(-199), t] };
         }
 
@@ -249,13 +249,18 @@ export function useWebSocket() {
   const [dashState, dispatch] = useReducer(reducer, initial);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(false);
 
   const connect = useCallback(() => {
+    if (!mountedRef.current) return;
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) return;
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
     ws.onopen = () => dispatch({ type: "CONNECTED" });
     ws.onclose = () => {
+      if (wsRef.current !== ws || !mountedRef.current) return;
       dispatch({ type: "DISCONNECTED" });
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       reconnectTimer.current = setTimeout(connect, 3000);
     };
     ws.onerror = () => ws.close();
@@ -268,10 +273,13 @@ export function useWebSocket() {
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     connect();
     return () => {
-      wsRef.current?.close();
+      mountedRef.current = false;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      wsRef.current?.close();
+      wsRef.current = null;
     };
   }, [connect]);
 

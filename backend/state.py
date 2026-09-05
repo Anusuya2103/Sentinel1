@@ -108,7 +108,7 @@ def mark_action_dispatched(action_id: str, approved_by: str) -> bool:
     return True
 
 
-def add_transcript(responder_id: str, text: str) -> None:
+def add_transcript(responder_id: str, text: str) -> dict[str, Any]:
     entry = {
         "responder_id": responder_id,
         "text": text,
@@ -118,6 +118,7 @@ def add_transcript(responder_id: str, text: str) -> None:
     # Keep last 200
     if len(_state["transcripts"]) > 200:
         _state["transcripts"] = _state["transcripts"][-200:]
+    return entry
 
 
 def set_agent_session(session_id: str | None, status: str) -> None:

@@ -38,6 +38,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sentinel1.main")
 
+_demo_task: asyncio.Task | None = None
+
 app = FastAPI(title="Sentinel-1", version="1.0.0")
 
 app.add_middleware(
@@ -237,11 +239,9 @@ class InjectTranscriptRequest(BaseModel):
 @app.post("/debug/inject_transcript")
 async def inject_transcript(req: InjectTranscriptRequest):
     """Push a fake transcript entry â€” smoke-tests the full pipeline."""
-    state.add_transcript(req.responder_id, req.text)
+    entry = state.add_transcript(req.responder_id, req.text)
     await ws_manager.broadcast("transcript", {
-        "responder_id": req.responder_id,
-        "text": req.text,
-        "timestamp": time.time(),
+        **entry,
         "source": "debug_inject",
     })
     return {"ok": True, "queued": True}
@@ -266,6 +266,15 @@ async def reset_demo():
     Clears incidents, actions, transcripts, audit log.
     Does NOT stop the agent session.
     """
+    global _demo_task
+    if _demo_task and not _demo_task.done():
+        _demo_task.cancel()
+        try:
+            await _demo_task
+        except asyncio.CancelledError:
+            pass
+    _demo_task = None
+
     s = state.get_state()
     s["incidents"].clear()
     s["actions"].clear()
@@ -292,49 +301,64 @@ async def run_demo():
     Auto-inject the full demo scenario for presentations.
     Injects all transcripts with timing, then triggers spike.
     """
+    global _demo_task
+    if _demo_task and not _demo_task.done():
+        return {"ok": False, "message": "Demo scenario is already running"}
+
     import asyncio as _asyncio
 
     async def _run():
-        if not agora_agent.get_active_session_id():
-            await agora_agent.create_agent_session()
-        await asyncio.sleep(2)
-        await agora_agent.send_think(
-            "Start the incident demo now. Say: Sentinel-1 AI online. Fire Chief, give me your initial status report."
-        )
-
-        transcripts = [
-            ("Fire_Chief", "This is Fire Chief. Warehouse B fire appears contained on the east side. I am moving my team in for assessment.", 0),
-            ("Traffic_Control", "Traffic Control here. North Gate is clear. Civilian evacuation is complete. Route is open for emergency vehicles.", 2),
-            ("Hazmat_Lead", "Hazmat Lead reporting. Sensor B is showing 42 parts per million chlorine at Chemical Storage. Elevated but monitoring.", 4),
-            ("Fire_Chief", "Team is entering Warehouse B now. No visible hazard. Proceeding with structural assessment.", 10),
-            ("Hazmat_Lead", "STOP. Do not enter. Sensor B just jumped to 78 parts per million. Wind is pushing chlorine plume toward Warehouse B. Fire Chief pull your team back immediately.", 12),
-            ("Traffic_Control", "I have two ambulances inbound through East Gate. Do not close that gate. Medical response will be blocked.", 16),
-            ("Hazmat_Lead", "East Gate must close. Toxicity is critical. Anyone near that entrance will be exposed. This is a mass casualty risk.", 18),
-            ("Fire_Chief", "We have a man down. One of my team collapsed near Chemical Storage. Requesting immediate medical evacuation.", 22),
-        ]
-
-        for responder_id, text, delay in transcripts:
-            await _asyncio.sleep(delay if delay == 0 else 2)
-            state.add_transcript(responder_id, text)
-            await ws_manager.broadcast("transcript", {
-                "responder_id": responder_id,
-                "text": text,
-                "timestamp": time.time(),
-                "source": "demo_auto",
-            })
-            spoken = await agora_agent.send_think(
-                f'Simulate the responder {responder_id} speaking on the radio. '
-                f'Say exactly this aloud, without commentary: "{text}"'
+        try:
+            if not agora_agent.get_active_session_id():
+                await agora_agent.create_agent_session()
+            await asyncio.sleep(2)
+            await agora_agent.send_think(
+                "Start the incident demo now. Say: Sentinel-1 AI online. Fire Chief, give me your initial status report."
             )
-            if not spoken:
-                logger.warning("Could not voice demo line for %s", responder_id)
 
-        # Trigger spike after all transcripts
-        await _asyncio.sleep(3)
-        sensors.trigger_spike()
-        logger.info("Demo scenario completed")
+            transcripts = [
+                ("Fire_Chief", "This is Fire Chief. Warehouse B fire appears contained on the east side. I am moving my team in for assessment."),
+                ("Traffic_Control", "Traffic Control here. North Gate is clear. Civilian evacuation is complete. Route is open for emergency vehicles."),
+                ("Hazmat_Lead", None),
+                ("Fire_Chief", "Team is entering Warehouse B now. No visible hazard. Proceeding with structural assessment."),
+                ("Hazmat_Lead", None),
+                ("Traffic_Control", "I have two ambulances inbound through East Gate. Do not close that gate. Medical response will be blocked."),
+                ("Hazmat_Lead", "East Gate must close. Toxicity is critical. Anyone near that entrance will be exposed. This is a mass casualty risk."),
+                ("Fire_Chief", "We have a man down. One of my team collapsed near Chemical Storage. Requesting immediate medical evacuation."),
+            ]
 
-    asyncio.create_task(_run())
+            for index, (responder_id, text) in enumerate(transcripts):
+                await _asyncio.sleep(2)
+                if index == 2:
+                    sensor_value = state.get_state()["sensors"]["Sensor_B"]["value"]
+                    text = f"Hazmat Lead reporting. Sensor B is showing {sensor_value:g} parts per million chlorine at Chemical Storage. Elevated but monitoring."
+                elif index == 4:
+                    sensors.trigger_spike()
+                    await _asyncio.sleep(3)
+                    sensor_value = state.get_state()["sensors"]["Sensor_B"]["value"]
+                    text = f"STOP. Do not enter. Sensor B is now {sensor_value:g} parts per million. Wind is pushing chlorine plume toward Warehouse B. Fire Chief pull your team back immediately."
+
+                entry = state.add_transcript(responder_id, text)
+                await ws_manager.broadcast("transcript", {
+                    **entry,
+                    "source": "demo_auto",
+                })
+                spoken = await agora_agent.send_think(
+                    f'Simulate the responder {responder_id} speaking on the radio. '
+                    f'Say exactly this aloud, without commentary: "{text}"'
+                )
+                if not spoken:
+                    logger.warning("Could not voice demo line for %s", responder_id)
+
+            logger.info("Demo scenario completed")
+        except asyncio.CancelledError:
+            logger.info("Demo scenario cancelled")
+            raise
+        finally:
+            global _demo_task
+            _demo_task = None
+
+    _demo_task = asyncio.create_task(_run())
     return {"ok": True, "message": "Demo scenario started — watch the dashboard"}
 
 
